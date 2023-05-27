@@ -75,7 +75,7 @@ class Experiment:
     def run_experiment(self):
         print("Running experiment: ", self.experiment_str)
         if "linear_regression_example" in self.experiment_str:
-            self.pytorch_linear_regression_example(True)
+            self.pytorch_linear_regression_example(data_exploration=False)
 
     def pytorch_linear_regression_example(self,data_exploration=False):
         Dataframes=self.dataset.load_dataset()
@@ -103,7 +103,7 @@ class Experiment:
         # We will use 80% of the data for training and 20% for testing.
         # We will also use the random_state parameter to ensure that we get the same split every time we run the code.
 
-        features = linear_regression_dataset.loc[:, ~linear_regression_dataset.columns.isin(['Price'])]
+        features = linear_regression_dataset.loc[:, ~linear_regression_dataset.columns.isin(['Price','Address'])]
         target = linear_regression_dataset['Price']
 
         X_train, X_test, y_train, y_test = train_test_split(features, target, test_size=0.2, random_state=42)
@@ -113,15 +113,14 @@ class Experiment:
         X_test = feature_scaler.transform(X_test)
 
         target_scaler = MinMaxScaler()
-        target_scaler.fit_transform(y_train)
-        target_scaler.transform(y_test)
-
+        y_train=target_scaler.fit_transform(y_train.values.reshape(-1, 1))
+        y_test=target_scaler.transform(y_test.values.reshape(-1, 1))
         #convert the data into tensors using the torch.from_numpy function which will allow us to use the data in PyTorch using data loaders.
 
         features_tensor_train = torch.from_numpy(X_train).float()
-        targets_tensor_train = torch.from_numpy(y_train.values).float()
+        targets_tensor_train = torch.from_numpy(y_train).float()
         features_tensor_test = torch.from_numpy(X_test).float()
-        targets_tensor_test = torch.from_numpy(y_test.values).float()
+        targets_tensor_test = torch.from_numpy(y_test).float()
 
         #create a dataset class to be able to use the data loaders
         class dataset(Dataset):
@@ -142,6 +141,64 @@ class Experiment:
 
         train_loader = DataLoader(train_set, batch_size=64, shuffle=False)
         test_loader = DataLoader(test_set, batch_size=64, shuffle=False)
+        class LinearRegressionModel(torch.nn.Module):
+            def __init__(self):
+                super(LinearRegressionModel, self).__init__()
+                self.linear = torch.nn.Linear(5, 1)
+
+            def forward(self, x):
+                y_pred = self.linear(x)
+                return y_pred
+
+        learning_rate = 0.01
+        epochs = 100
+        MLP = LinearRegressionModel()
+        optimizer = torch.optim.SGD(MLP.parameters(), lr=learning_rate)
+        criterion = torch.nn.MSELoss(reduction='mean')
+
+        #train the model
+        loss_per_epoch = []
+        for epoch in range(epochs):
+            for x_train, y_train in train_loader:
+                optimizer.zero_grad()
+                y_pred = MLP(x_train)
+                loss = criterion(y_pred, y_train)
+                loss.backward()
+                optimizer.step()
+            loss_per_epoch.append(loss.item())
+            print('epoch {}, loss {}'.format(epoch, loss.item()))
+
+        plt.plot(loss_per_epoch)
+        plt.show()
+
+        #test the model
+        with torch.no_grad():
+            y_pred_vals=[]
+            for x_test, y_test in test_loader:
+                y_pred = MLP(x_test)
+                loss = criterion(y_pred, y_test)
+                y_pred_vals.append(y_pred.squeeze())
+                print('loss on test set: {}'.format(loss.item()))
+
+            y_pred_vals=torch.cat(y_pred_vals)
+            y_test_vals=torch.cat([y_test for x_test, y_test in test_loader]).squeeze()
+
+            #plot the results
+            plt.scatter(y_test_vals, y_pred_vals)
+            plt.xlabel('Actual Price')
+            plt.ylabel('Predicted Price')
+            plt.title('Actual vs Predicted Price')
+            plt.show()
+
+            #calculate the r2 score
+
+            def r_squared(y_true, y_pred):
+                ssr = torch.sum((y_true - y_pred) ** 2)
+                sst = torch.sum((y_true - torch.mean(y_true)) ** 2)
+                r2_score = 1 - ssr / sst
+                return r2_score
+            r2 = r_squared(y_test_vals, y_pred_vals)
+            print('r2 score: {}'.format(r2))
 
 
 
