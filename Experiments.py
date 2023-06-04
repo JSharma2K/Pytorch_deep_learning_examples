@@ -4,12 +4,12 @@ import pandas as pd
 import seaborn as sns
 import matplotlib.pyplot as plt
 from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import MinMaxScaler
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.utils.data import Dataset, DataLoader
-from sklearn.preprocessing import MinMaxScaler
-import torch
+import datetime
+import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
 
 
@@ -74,8 +74,10 @@ class Experiment:
 
     def run_experiment(self):
         print("Running experiment: ", self.experiment_str)
-        if "linear_regression_example" in self.experiment_str:
+        if "linear_regression_example" == self.experiment_str:
             self.pytorch_linear_regression_example(data_exploration=False)
+        elif "linear_regression_example_categorical" == self.experiment_str:
+            self.pytorch_linear_regression_with_categorical(data_exploration=False)
 
     def pytorch_linear_regression_example(self,data_exploration=False):
         Dataframes=self.dataset.load_dataset()
@@ -199,6 +201,176 @@ class Experiment:
                 return r2_score
             r2 = r_squared(y_test_vals, y_pred_vals)
             print('r2 score: {}'.format(r2))
+
+    def pytorch_linear_regression_with_categorical(self,data_exploration=False):
+        Dataframes=self.dataset.load_dataset()
+        if len(Dataframes)==1:
+            linear_regression_categorical_dataset=Dataframes[0]
+        else:
+            linear_regression_categorical_dataset=pd.concat(Dataframes,ignore_index=True)
+
+        if data_exploration:
+            # doing some data exploration
+            print(linear_regression_categorical_dataset.info())
+            print(linear_regression_categorical_dataset.describe())
+            sns.pairplot(linear_regression_categorical_dataset)
+            print(linear_regression_categorical_dataset.corr())
+            print(linear_regression_categorical_dataset.head())
+            plt.show()
+
+        #drop NA values
+        linear_regression_categorical_dataset.dropna(inplace=True)
+
+
+        linear_regression_categorical_dataset['Date_of_Journey'] = pd.to_datetime(linear_regression_categorical_dataset['Date_of_Journey'])
+        linear_regression_categorical_dataset['year'] = linear_regression_categorical_dataset['Date_of_Journey'].apply(lambda x: str(x.date()).split('-')[0])
+        linear_regression_categorical_dataset['month'] = linear_regression_categorical_dataset['Date_of_Journey'].apply(lambda x: str(x.date()).split('-')[1])
+        linear_regression_categorical_dataset['day'] = linear_regression_categorical_dataset['Date_of_Journey'].apply(lambda x: str(x.date()).split('-')[2])
+
+        linear_regression_categorical_dataset['year'] = linear_regression_categorical_dataset['year'].astype(int)
+        linear_regression_categorical_dataset['month'] = linear_regression_categorical_dataset['month'].astype(int)
+        linear_regression_categorical_dataset['day'] = linear_regression_categorical_dataset['day'].astype(int)
+
+        linear_regression_categorical_dataset.drop(columns=['Date_of_Journey'], inplace=True)
+
+        linear_regression_categorical_dataset['Route'] = linear_regression_categorical_dataset['Route'].apply(lambda x: "".join(x.split('→')))
+        linear_regression_categorical_dataset['Total_Stops'].replace({'non-stop': '0'}, inplace=True)
+        linear_regression_categorical_dataset['Total_Stops'] = linear_regression_categorical_dataset["Total_Stops"].apply(lambda x: int(x.split(" ")[0]))
+        linear_regression_categorical_dataset['Total_Stops'] = linear_regression_categorical_dataset['Total_Stops'].astype(int)
+
+        linear_regression_categorical_dataset.drop(columns=['Dep_Time','Arrival_Time'], inplace=True)
+        def get_minutes(row):
+            if len(row.split(" ")) == 1 and 'h' in row:
+                hours_to_min = 60 * int(row[:-1])
+                return hours_to_min
+            elif len(row.split(" ")) == 1 and 'm' in row:
+                mins = row[:-1]
+                return int(mins)
+            hours_and_mins = row.split('h')
+            hours_to_min = 60 * int(hours_and_mins[0])
+            mins = int(hours_and_mins[1][:-1])
+            return int(hours_to_min + mins)
+
+        linear_regression_categorical_dataset['Duration'] = linear_regression_categorical_dataset['Duration'].apply(lambda x: get_minutes(x))
+
+        #set categorical columns as type category
+        linear_regression_categorical_dataset['Airline']=linear_regression_categorical_dataset['Airline'].astype('category')
+        linear_regression_categorical_dataset['Source']=linear_regression_categorical_dataset['Source'].astype('category')
+        linear_regression_categorical_dataset['Destination']=linear_regression_categorical_dataset['Destination'].astype('category')
+        linear_regression_categorical_dataset['Additional_Info']=linear_regression_categorical_dataset['Additional_Info'].astype('category')
+        linear_regression_categorical_dataset['Route']=linear_regression_categorical_dataset['Route'].astype('category')
+
+        #label encode the categorical columns
+        linear_regression_categorical_dataset['Airline']=linear_regression_categorical_dataset['Airline'].cat.codes.astype('category')
+        linear_regression_categorical_dataset['Source']=linear_regression_categorical_dataset['Source'].cat.codes.astype('category')
+        linear_regression_categorical_dataset['Destination']=linear_regression_categorical_dataset['Destination'].cat.codes.astype('category')
+        linear_regression_categorical_dataset['Additional_Info']=linear_regression_categorical_dataset['Additional_Info'].cat.codes.astype('category')
+        linear_regression_categorical_dataset['Route']=linear_regression_categorical_dataset['Route'].cat.codes.astype('category')
+
+        #determine the embedding sizes for each categorical column
+
+
+        corr_df_int_columns=linear_regression_categorical_dataset.select_dtypes(include=['int64','float64'])
+        sns.pairplot(corr_df_int_columns)
+        plt.show()
+
+        #create features and target variables
+
+        target=linear_regression_categorical_dataset.drop(columns=['Price'])
+        features=linear_regression_categorical_dataset['Price']
+
+        X_train, X_test, y_train, y_test = train_test_split(target, features, test_size=0.2, random_state=42)
+
+        embedded_cols = {n: len(col.cat.categories) for n, col in X_train.items() if col.dtype.name == 'category' and len(col.cat.categories) > 2}
+        embedding_sizes = [(n_categories, min(50, (n_categories + 1) // 2)) for _, n_categories in
+                           embedded_cols.items()]
+
+        #create a dataset and dataloader
+        class Dataset(torch.utils.data.Dataset):
+            def __init__(self, features, target):
+                self.numerical_features = features.select_dtypes(include=['int64', 'float64'])
+                self.categorical_features=features.select_dtypes(include=['category'])
+                self.target = target
+
+            def __len__(self):
+                return len(self.numerical_features)
+
+            def __getitem__(self, idx):
+                return torch.tensor(self.numerical_features.iloc[idx].values,dtype=torch.float),torch.tensor(self.categorical_features.iloc[idx].values,dtype=torch.float),torch.tensor(self.target.iloc[idx],dtype=torch.float)
+
+
+        train_dl= torch.utils.data.DataLoader(Dataset(X_train, y_train), batch_size=64, shuffle=True)
+        test_dl= torch.utils.data.DataLoader(Dataset(X_test, y_test), batch_size=64, shuffle=True)
+
+        for x, y, z in train_dl:
+            print(x)
+            print(y)
+            print(z)
+            break
+
+
+        class EmbeddingNetwork(nn.Module):
+            def __init__(self, categorical_dims):
+                super().__init__()
+                self.all_embeddings = nn.ModuleList(
+                    [nn.Embedding(dim, min(50, (dim + 1) // 2)) for dim in categorical_dims])
+
+            def forward(self, x_categorical):
+                embeddings = []
+                for i, e in enumerate(self.all_embeddings):
+                    embeddings.append(e(x_categorical[:, i]))
+                return torch.cat(embeddings, 1)
+
+
+        class MLP_categorical_Regressor(nn.Module):
+            def __init__(self, embedding_sizes, n_cont):
+                super().__init__()
+                self.embeddings = EmbeddingNetwork(embedding_sizes)
+                n_emb = sum(e[1] for e in embedding_sizes)
+                self.n_emb, self.n_cont = n_emb, n_cont
+                self.lin1 = nn.Linear(self.n_emb + self.n_cont, 100)
+                self.lin2 = nn.Linear(100, 50)
+                self.lin3 = nn.Linear(50, 1)
+                self.bn1 = nn.BatchNorm1d(self.n_cont)
+                self.bn2 = nn.BatchNorm1d(100)
+                self.bn3 = nn.BatchNorm1d(50)
+                self.emb_drop = nn.Dropout(0.6)
+                self.drops = nn.Dropout(0.3)
+
+            def forward(self, x_numerical, x_categorical):
+                x = self.embeddings(x_categorical)
+                x = self.emb_drop(x)
+                x2 = self.bn1(x_numerical)
+                x = torch.cat([x, x2], 1)
+                x = self.drops(F.relu(self.bn2(self.lin1(x))))
+                x = self.drops(F.relu(self.bn3(self.lin2(x))))
+                x = self.lin3(x)
+                return x
+
+        #define training loop
+        def train_model(model, train_dl, valid_dl, loss_fn, optimizer, n_epochs):
+            for epoch in range(n_epochs):
+                model.train()
+                for x_numerical,x_categorical,y in train_dl:
+                    y_pred = model(x_numerical,x_categorical)
+                    loss = loss_fn(y_pred, y.unsqueeze(1))
+                    optimizer.zero_grad()
+                    loss.backward()
+                    optimizer.step()
+                model.eval()
+                with torch.no_grad():
+                    valid_loss = sum(loss_fn(model(x_numerical,x_categorical), y.unsqueeze(1)) for x_numerical,x_categorical,y in valid_dl)
+                print("Epoch ", epoch, "Validation loss ", valid_loss / len(valid_dl))
+
+        MLP_model=MLP_categorical_Regressor(embedded_cols.items() , 5)
+
+        train_model(MLP_model, train_dl, test_dl, torch.nn.MSELoss(), torch.optim.Adam(MLP_model.parameters(), lr=0.001))
+
+
+
+
+
+
 
 
 
