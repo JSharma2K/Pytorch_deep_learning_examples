@@ -270,9 +270,9 @@ class Experiment:
         #determine the embedding sizes for each categorical column
 
 
-        corr_df_int_columns=linear_regression_categorical_dataset.select_dtypes(include=['int64','float64'])
-        sns.pairplot(corr_df_int_columns)
-        plt.show()
+        #corr_df_int_columns=linear_regression_categorical_dataset.select_dtypes(include=['int64','float64'])
+        #sns.pairplot(corr_df_int_columns)
+        #plt.show()
 
         #create features and target variables
 
@@ -296,7 +296,7 @@ class Experiment:
                 return len(self.numerical_features)
 
             def __getitem__(self, idx):
-                return torch.tensor(self.numerical_features.iloc[idx].values,dtype=torch.float),torch.tensor(self.categorical_features.iloc[idx].values,dtype=torch.float),torch.tensor(self.target.iloc[idx],dtype=torch.float)
+                return torch.tensor(self.numerical_features.iloc[idx].values,dtype=torch.float),torch.tensor(self.categorical_features.iloc[idx].values,dtype=torch.int),torch.tensor(self.target.iloc[idx],dtype=torch.float)
 
 
         train_dl= torch.utils.data.DataLoader(Dataset(X_train, y_train), batch_size=64, shuffle=True)
@@ -326,7 +326,7 @@ class Experiment:
             def __init__(self, embedding_sizes, n_cont):
                 super().__init__()
                 self.embeddings = EmbeddingNetwork(embedding_sizes)
-                n_emb = sum(e[1] for e in embedding_sizes)
+                n_emb = sum(e.embedding_dim for e in self.embeddings.all_embeddings) #length of all embeddings combined
                 self.n_emb, self.n_cont = n_emb, n_cont
                 self.lin1 = nn.Linear(self.n_emb + self.n_cont, 100)
                 self.lin2 = nn.Linear(100, 50)
@@ -362,9 +362,9 @@ class Experiment:
                     valid_loss = sum(loss_fn(model(x_numerical,x_categorical), y.unsqueeze(1)) for x_numerical,x_categorical,y in valid_dl)
                 print("Epoch ", epoch, "Validation loss ", valid_loss / len(valid_dl))
 
-        MLP_model=MLP_categorical_Regressor(embedded_cols.items() , 5)
+        MLP_model=MLP_categorical_Regressor(embedded_cols.values() , 5)
 
-        train_model(MLP_model, train_dl, test_dl, torch.nn.MSELoss(), torch.optim.Adam(MLP_model.parameters(), lr=0.001))
+        train_model(MLP_model, train_dl, test_dl, torch.nn.MSELoss(), torch.optim.Adam(MLP_model.parameters(), lr=0.001),100)
 
 
 
