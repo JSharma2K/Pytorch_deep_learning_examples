@@ -11,7 +11,7 @@ import torch.optim as optim
 import datetime
 import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
-
+from utils import r_squared
 
 class Dataset:
 
@@ -194,11 +194,7 @@ class Experiment:
 
             #calculate the r2 score
 
-            def r_squared(y_true, y_pred):
-                ssr = torch.sum((y_true - y_pred) ** 2)
-                sst = torch.sum((y_true - torch.mean(y_true)) ** 2)
-                r2_score = 1 - ssr / sst
-                return r2_score
+
             r2 = r_squared(y_test_vals, y_pred_vals)
             print('r2 score: {}'.format(r2))
 
@@ -221,7 +217,7 @@ class Experiment:
         #drop NA values
         linear_regression_categorical_dataset.dropna(inplace=True)
 
-
+        '''
         linear_regression_categorical_dataset['Date_of_Journey'] = pd.to_datetime(linear_regression_categorical_dataset['Date_of_Journey'])
         linear_regression_categorical_dataset['year'] = linear_regression_categorical_dataset['Date_of_Journey'].apply(lambda x: str(x.date()).split('-')[0])
         linear_regression_categorical_dataset['month'] = linear_regression_categorical_dataset['Date_of_Journey'].apply(lambda x: str(x.date()).split('-')[1])
@@ -230,6 +226,7 @@ class Experiment:
         linear_regression_categorical_dataset['year'] = linear_regression_categorical_dataset['year'].astype(int)
         linear_regression_categorical_dataset['month'] = linear_regression_categorical_dataset['month'].astype(int)
         linear_regression_categorical_dataset['day'] = linear_regression_categorical_dataset['day'].astype(int)
+        '''
 
         linear_regression_categorical_dataset.drop(columns=['Date_of_Journey'], inplace=True)
 
@@ -267,10 +264,13 @@ class Experiment:
         linear_regression_categorical_dataset['Additional_Info']=linear_regression_categorical_dataset['Additional_Info'].cat.codes.astype('category')
         linear_regression_categorical_dataset['Route']=linear_regression_categorical_dataset['Route'].cat.codes.astype('category')
 
-        #determine the embedding sizes for each categorical column
+        corr_df_int_columns=linear_regression_categorical_dataset.select_dtypes(include=['int64','float64'])
+        feature_scaler = MinMaxScaler()
+        #X_train = feature_scaler.fit_transform(X_train)
+        #X_test = feature_scaler.transform(X_test)
 
 
-        #corr_df_int_columns=linear_regression_categorical_dataset.select_dtypes(include=['int64','float64'])
+
         #sns.pairplot(corr_df_int_columns)
         #plt.show()
 
@@ -282,32 +282,38 @@ class Experiment:
         X_train, X_test, y_train, y_test = train_test_split(target, features, test_size=0.2, random_state=42)
 
         embedded_cols = {n: len(col.cat.categories) for n, col in X_train.items() if col.dtype.name == 'category' and len(col.cat.categories) > 2}
-        embedding_sizes = [(n_categories, min(50, (n_categories + 1) // 2)) for _, n_categories in
-                           embedded_cols.items()]
 
         #create a dataset and dataloader
         class Dataset(torch.utils.data.Dataset):
-            def __init__(self, features, target):
+            def __init__(self, features, target,fitted_scaler_train,fitted_scaler_target):
                 self.numerical_features = features.select_dtypes(include=['int64', 'float64'])
                 self.categorical_features=features.select_dtypes(include=['category'])
+                self.feature_scaler = fitted_scaler_train
+                self.target_scaler = fitted_scaler_target
                 self.target = target
+
+                self.numerical_features = pd.DataFrame(self.feature_scaler.transform(self.numerical_features),
+                                                       columns=self.numerical_features.columns)
+                self.target = pd.DataFrame(self.target_scaler.transform(target.values.reshape(-1, 1)),
+                                           columns=['Price'])
 
             def __len__(self):
                 return len(self.numerical_features)
 
             def __getitem__(self, idx):
-                return torch.tensor(self.numerical_features.iloc[idx].values,dtype=torch.float),torch.tensor(self.categorical_features.iloc[idx].values,dtype=torch.int),torch.tensor(self.target.iloc[idx],dtype=torch.float)
+                numerical = torch.tensor(self.numerical_features.iloc[idx].values, dtype=torch.float)
+                categorical = torch.tensor(self.categorical_features.iloc[idx].values, dtype=torch.int)
+                target = torch.tensor(self.target.iloc[idx].values, dtype=torch.float)
 
+                return numerical,categorical,target
 
-        train_dl= torch.utils.data.DataLoader(Dataset(X_train, y_train), batch_size=64, shuffle=True)
-        test_dl= torch.utils.data.DataLoader(Dataset(X_test, y_test), batch_size=64, shuffle=True)
+        feature_scaler = MinMaxScaler()
+        target_scaler = MinMaxScaler()
+        fitted_scaler_train=feature_scaler.fit(X_train.select_dtypes(include=['int64', 'float64']))
+        fitted_scaler_target=target_scaler.fit(y_train.values.reshape(-1, 1))
 
-        for x, y, z in train_dl:
-            print(x)
-            print(y)
-            print(z)
-            break
-
+        train_dl= torch.utils.data.DataLoader(Dataset(X_train, y_train,fitted_scaler_train,fitted_scaler_target), batch_size=64, shuffle=True)
+        test_dl= torch.utils.data.DataLoader(Dataset(X_test, y_test,fitted_scaler_train,fitted_scaler_target), batch_size=64, shuffle=True)
 
         class EmbeddingNetwork(nn.Module):
             def __init__(self, categorical_dims):
@@ -348,27 +354,71 @@ class Experiment:
                 return x
 
         #define training loop
-        def train_model(model, train_dl, valid_dl, loss_fn, optimizer, n_epochs):
+        def train_model(model, train_dl, loss_fn, optimizer, n_epochs,train=True):
+            train_loss_per_epoch = []
+            valid_loss_per_epoch = []
             for epoch in range(n_epochs):
+                train_loss=[]
                 model.train()
                 for x_numerical,x_categorical,y in train_dl:
                     y_pred = model(x_numerical,x_categorical)
-                    loss = loss_fn(y_pred, y.unsqueeze(1))
+                    loss = loss_fn(y_pred,y)
+                    train_loss.append(loss.item())
                     optimizer.zero_grad()
                     loss.backward()
                     optimizer.step()
-                model.eval()
-                with torch.no_grad():
-                    valid_loss = sum(loss_fn(model(x_numerical,x_categorical), y.unsqueeze(1)) for x_numerical,x_categorical,y in valid_dl)
-                print("Epoch ", epoch, "Validation loss ", valid_loss / len(valid_dl))
+                train_loss = sum(train_loss)
+                train_loss_per_epoch.append(train_loss)
+                print("Epoch ", epoch, "Train loss ", train_loss / len(train_dl))
 
-        MLP_model=MLP_categorical_Regressor(embedded_cols.values() , 5)
+                #model.eval()
+                #with torch.no_grad():
 
-        train_model(MLP_model, train_dl, test_dl, torch.nn.MSELoss(), torch.optim.Adam(MLP_model.parameters(), lr=0.001),100)
+                    #y_pred_and_orig_vals=[(model(x_numerical,x_categorical),y) for x_numerical,x_categorical,y in valid_dl]
+                    #valid_loss = sum(loss_fn(model(x_numerical,x_categorical), y) for x_numerical,x_categorical,y in valid_dl)
+                    #valid_loss_per_epoch.append(valid_loss.item())
+                #print("Epoch ", epoch, "Validation loss ", valid_loss / len(valid_dl))
+            torch.save(model.state_dict(), '/Users/sharma19/PycharmProjects/PersonalProject/models/lin_reg_categorical_model_weights.pth')
+            return train_loss_per_epoch
+
+        def validate_model(model, valid_dl, loss_fn):
+            model.load_state_dict(torch.load('/Users/sharma19/PycharmProjects/PersonalProject/models/lin_reg_categorical_model_weights.pth'))
+            model.eval()
+            with torch.no_grad():
+                y_pred_and_orig_vals=[(model(x_numerical,x_categorical),y) for x_numerical,x_categorical,y in valid_dl]
+                valid_loss = sum(loss_fn(model(x_numerical,x_categorical), y) for x_numerical,x_categorical,y in valid_dl)
+                print("Validation loss ", valid_loss / len(valid_dl))
+            return y_pred_and_orig_vals
 
 
 
 
+        MLP_model_train=MLP_categorical_Regressor(embedded_cols.values() , 2)
+        MLP_model_val = MLP_categorical_Regressor(embedded_cols.values(), 2)
+        train_loss=train_model(MLP_model_train, train_dl, torch.nn.MSELoss(), torch.optim.Adam(MLP_model_train.parameters(), lr=0.001),50,train=False)
+        y_pred_and_orig_vals=validate_model(MLP_model_val, test_dl, torch.nn.MSELoss())
+
+        y_pred_vals=torch.cat([y_pred.squeeze() for y_pred,y in y_pred_and_orig_vals])
+        y_true_vals=torch.cat([y.squeeze() for y_pred,y in y_pred_and_orig_vals])
+        print('r_squared_value is: {}'.format(r_squared(y_true_vals,y_pred_vals)))
+
+        fig, ax = plt.subplots()
+        ax.plot(train_loss, label='train loss')
+        plt.show()
+
+
+
+
+       # with torch.no_grad():
+           # y_pred_vals=[]
+            #for x_test, y_test in test_loader:
+                #y_pred = MLP(x_test)
+                #loss = criterion(y_pred, y_test)
+                #y_pred_vals.append(y_pred.squeeze())
+                #print('loss on test set: {}'.format(loss.item()))
+
+            #y_pred_vals=torch.cat(y_pred_vals)
+            #y_test_vals=torch.cat([y_test for x_test, y_test in test_loader]).squeeze()
 
 
 
