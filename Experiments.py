@@ -78,6 +78,8 @@ class Experiment:
             self.pytorch_linear_regression_example(data_exploration=False)
         elif "linear_regression_example_categorical" == self.experiment_str:
             self.pytorch_linear_regression_with_categorical(data_exploration=False)
+        elif "tabular_binary_classification_example" == self.experiment_str:
+            self.tabular_binary_classification_example(data_exploration=False)
 
     def pytorch_linear_regression_example(self,data_exploration=False):
         Dataframes=self.dataset.load_dataset()
@@ -340,6 +342,7 @@ class Experiment:
                 self.bn1 = nn.BatchNorm1d(self.n_cont)
                 self.bn2 = nn.BatchNorm1d(100)
                 self.bn3 = nn.BatchNorm1d(50)
+                self.bn4=nn.BatchNorm1d(25)
                 self.emb_drop = nn.Dropout(0.6)
                 self.drops = nn.Dropout(0.3)
 
@@ -419,6 +422,20 @@ class Experiment:
 
             #y_pred_vals=torch.cat(y_pred_vals)
             #y_test_vals=torch.cat([y_test for x_test, y_test in test_loader]).squeeze()
+
+
+    def tabular_binary_classification_example(self,data_exploration=True):
+        Dataframes=self.dataset.load_dataset()
+        if len(Dataframes)==1:
+            tabular_classification_dataset=Dataframes[0]
+        else:
+            tabular_classification_dataset=pd.concat(Dataframes,ignore_index=True)
+
+        if data_exploration:
+            print(tabular_classification_dataset.info())
+            print(tabular_classification_dataset.describe())
+
+
 
 
 
