@@ -7,11 +7,14 @@ from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import MinMaxScaler
 import torch
 import torch.nn as nn
+from tqdm import tqdm
 import torch.optim as optim
 import datetime
+from torch.utils.data import WeightedRandomSampler
 import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
 from utils import r_squared
+
 
 class Dataset:
 
@@ -79,7 +82,7 @@ class Experiment:
         elif "linear_regression_example_categorical" == self.experiment_str:
             self.pytorch_linear_regression_with_categorical(data_exploration=False)
         elif "tabular_binary_classification_example" == self.experiment_str:
-            self.tabular_binary_classification_example(data_exploration=False)
+            self.tabular_multiclass_classification_example(data_exploration=False)
 
     def pytorch_linear_regression_example(self,data_exploration=False):
         Dataframes=self.dataset.load_dataset()
@@ -424,7 +427,7 @@ class Experiment:
             #y_test_vals=torch.cat([y_test for x_test, y_test in test_loader]).squeeze()
 
 
-    def tabular_binary_classification_example(self,data_exploration=True):
+    def tabular_multiclass_classification_example(self,data_exploration=True):
         Dataframes=self.dataset.load_dataset()
         if len(Dataframes)==1:
             tabular_classification_dataset=Dataframes[0]
@@ -434,6 +437,140 @@ class Experiment:
         if data_exploration:
             print(tabular_classification_dataset.info())
             print(tabular_classification_dataset.describe())
+
+        #drop columns with histogram in column name
+        tabular_classification_dataset=tabular_classification_dataset.drop([col for col in tabular_classification_dataset.columns if 'histogram' in col],axis=1)
+        print(tabular_classification_dataset.info())
+
+        if data_exploration:
+            #plot histograms
+            for col in tabular_classification_dataset.columns:
+                tabular_classification_dataset.hist(col,bins=50, figsize=(20, 15))
+                plt.title(col)
+                plt.show()
+            #corr matrix
+            corr_matrix=tabular_classification_dataset.corr()
+            #plot heatmap
+            plt.figure(figsize=(20, 15))
+            sns.heatmap(corr_matrix, annot=True)
+            plt.show()
+
+        #drop columns with no correlation with target
+
+        tabular_classification_dataset.drop(['accelerations','uterine_contractions','mean_value_of_short_term_variability','mean_value_of_long_term_variability'],axis=1,inplace=True)
+
+        #create target and features
+        target=tabular_classification_dataset['fetal_health']
+        features=tabular_classification_dataset.drop('fetal_health',axis=1)
+        target.replace({1:0,2:1,3:2},inplace=True) #need to do this as loss function expects target to be in range 0 to n_classes-1
+        #plot bar chart of target
+        target.value_counts().plot(kind='bar')
+        #add percentage labels to bar chart
+        for p in plt.gca().patches:
+            percentage = '{:.1f}%'.format(100 * p.get_height() / len(target))
+            x = p.get_x() + p.get_width() / 2 - 0.05
+            y = p.get_y() + p.get_height()
+            plt.annotate(percentage, (x, y), size=12)
+        plt.show()
+        X_train, X_test, y_train, y_test = train_test_split(features, target, test_size=0.2, random_state=42)
+
+        #create a simple dataset class and dataloader to load the data
+
+        class_counts=target.value_counts()
+        class_weights=[1/class_counts[i] for i in range(len(class_counts))] #inverse of count is the weight
+        sampler=WeightedRandomSampler(weights=class_weights,num_samples=len(class_counts)*class_counts[0],replacement=True)
+        class classification_dataset(torch.utils.data.Dataset):
+            def __init__(self, features, target):
+                self.features = features
+                self.target = target
+
+            def __len__(self):
+                return self.features.shape[0]
+
+            def __getitem__(self, idx):
+                return self.features[idx], self.target[idx]
+
+        train_dataset=classification_dataset(torch.tensor(X_train.values),torch.tensor(y_train.values))
+        test_dataset=classification_dataset(torch.tensor(X_test.values),torch.tensor(y_test.values))
+
+        #create data loaders
+        train_dl = torch.utils.data.DataLoader(train_dataset, batch_size=64, shuffle=True)
+        test_dl = torch.utils.data.DataLoader(test_dataset, batch_size=64, shuffle=True)
+
+        #create a simple MLP model
+        class MLP_categorical_classifier(torch.nn.Module):
+            def __init__(self):
+                super(MLP_categorical_classifier, self).__init__()
+                self.fc1 = torch.nn.Linear(7,64)
+                self.relu = torch.nn.ReLU()
+                self.fc2 = torch.nn.Linear(64, 32)
+                self.fc3 = torch.nn.Linear(32, 16)
+                self.fc4 = torch.nn.Linear(16, 3)
+
+            def forward(self, x):
+                x = self.fc1(x.to(torch.float32)) #notice how we have to convert the input to float32 as the wight matrix is float32 dtype and our data was float64,
+                                                      # this would throw an error if we didn't cast the input to float32
+                x = self.relu(x)
+                x = self.fc2(x)
+                x = self.relu(x)
+                x = self.fc3(x)
+                x = self.relu(x)
+                output = self.fc4(x)
+                return output
+
+        #create training loop
+        learning_rate = 0.01
+        epochs = 100
+        MLP = MLP_categorical_classifier()
+        criterion = nn.CrossEntropyLoss()
+        optimizer = torch.optim.Adam(MLP.parameters(), lr=learning_rate) # notice how the optimizer has changed, there are many kinds of optimizers explained in the documentation
+
+
+        #train the model
+        loss_per_epoch = []
+        for epoch in range(epochs):
+            correct = 0
+            total = 0
+            #loop = tqdm(enumerate(train_dl), total=len(train_dl), leave=False)
+            for x_train, y_train in train_dl:
+                optimizer.zero_grad()
+                y_pred = MLP(x_train)
+                loss = criterion(y_pred, y_train.to(torch.int64))
+                loss.backward()
+                optimizer.step()
+
+                # Calculate accuracy
+                _, predicted = torch.max(y_pred.data, 1)
+                total += y_train.size(0)
+                correct += (predicted == y_train).sum().item()
+            acc=100 * correct / total
+
+            loss_per_epoch.append(loss.item())
+            #loop.set_description(f"Epoch [{epoch}/{epochs}]")
+            #loop.set_postfix(loss=loss.item(), acc=acc)
+            print('epoch {}, loss {}, accuracy {}'.format(epoch, loss.item(),acc))
+
+        print('training finished')
+        #plot loss
+        plt.plot(loss_per_epoch)
+        plt.title('loss')
+        plt.show()
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
