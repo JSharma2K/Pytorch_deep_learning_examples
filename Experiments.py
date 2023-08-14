@@ -14,6 +14,10 @@ from torch.utils.data import WeightedRandomSampler
 import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
 from utils import r_squared
+from imblearn.combine import SMOTETomek
+from imblearn.under_sampling import TomekLinks
+from torch.utils.tensorboard import SummaryWriter
+from torchmetrics.classification import MulticlassF1Score,MulticlassCohenKappa,MulticlassAUROC
 
 
 class Dataset:
@@ -457,7 +461,7 @@ class Experiment:
 
         #drop columns with no correlation with target
 
-        tabular_classification_dataset.drop(['accelerations','uterine_contractions','mean_value_of_short_term_variability','mean_value_of_long_term_variability'],axis=1,inplace=True)
+        #tabular_classification_dataset.drop(['accelerations','uterine_contractions','mean_value_of_short_term_variability','mean_value_of_long_term_variability'],axis=1,inplace=True)
 
         #create target and features
         target=tabular_classification_dataset['fetal_health']
@@ -471,14 +475,33 @@ class Experiment:
             x = p.get_x() + p.get_width() / 2 - 0.05
             y = p.get_y() + p.get_height()
             plt.annotate(percentage, (x, y), size=12)
+        plt.title('Target distribution before SMOTE')
         plt.show()
+
+        #Use SMOTE to balance the dataset because the data is imbalanced
+        resample_smote = SMOTETomek(tomek=TomekLinks(sampling_strategy='majority'))
+        features, target = resample_smote.fit_resample(features, target)
+
+        target.value_counts().plot(kind='bar')
+        #add percentage labels to bar chart
+        for p in plt.gca().patches:
+            percentage = '{:.1f}%'.format(100 * p.get_height() / len(target))
+            x = p.get_x() + p.get_width() / 2 - 0.05
+            y = p.get_y() + p.get_height()
+            plt.annotate(percentage, (x, y), size=12)
+        plt.title('Target distribution after SMOTE')
+        plt.show()
+
+
         X_train, X_test, y_train, y_test = train_test_split(features, target, test_size=0.2, random_state=42)
 
         #create a simple dataset class and dataloader to load the data
 
         class_counts=target.value_counts()
         class_weights=[1/class_counts[i] for i in range(len(class_counts))] #inverse of count is the weight
-        sampler=WeightedRandomSampler(weights=class_weights,num_samples=len(class_counts)*class_counts[0],replacement=True)
+        #num_samples=len(class_counts)*class_counts[0]
+        #sampler=WeightedRandomSampler(weights=class_weights,num_samples=4965,replacement=True)
+
         class classification_dataset(torch.utils.data.Dataset):
             def __init__(self, features, target):
                 self.features = features
@@ -501,7 +524,7 @@ class Experiment:
         class MLP_categorical_classifier(torch.nn.Module):
             def __init__(self):
                 super(MLP_categorical_classifier, self).__init__()
-                self.fc1 = torch.nn.Linear(7,64)
+                self.fc1 = torch.nn.Linear(11,64)
                 self.relu = torch.nn.ReLU()
                 self.fc2 = torch.nn.Linear(64, 32)
                 self.fc3 = torch.nn.Linear(32, 16)
@@ -519,8 +542,11 @@ class Experiment:
                 return output
 
         #create training loop
+        writer = SummaryWriter('runs/fetal_health_classifier') #intialize tensorboard writer
+        # to run tensorboard, open a terminal and type: tensorboard --logdir=runs in the terminal
+        # visit http://localhost:6006 to view the graphs
         learning_rate = 0.01
-        epochs = 100
+        epochs = 200
         MLP = MLP_categorical_classifier()
         criterion = nn.CrossEntropyLoss()
         optimizer = torch.optim.Adam(MLP.parameters(), lr=learning_rate) # notice how the optimizer has changed, there are many kinds of optimizers explained in the documentation
@@ -536,6 +562,7 @@ class Experiment:
                 optimizer.zero_grad()
                 y_pred = MLP(x_train)
                 loss = criterion(y_pred, y_train.to(torch.int64))
+                writer.add_scalar('Loss/train', loss, epoch) #visit http://localhost:6006 to view the graphs
                 loss.backward()
                 optimizer.step()
 
@@ -544,6 +571,7 @@ class Experiment:
                 total += y_train.size(0)
                 correct += (predicted == y_train).sum().item()
             acc=100 * correct / total
+            writer.add_scalar('Accuracy/train', acc, epoch) #visit http://localhost:6006 to view the graphs
 
             loss_per_epoch.append(loss.item())
             #loop.set_description(f"Epoch [{epoch}/{epochs}]")
@@ -552,9 +580,37 @@ class Experiment:
 
         print('training finished')
         #plot loss
-        plt.plot(loss_per_epoch)
-        plt.title('loss')
-        plt.show()
+        #plt.plot(loss_per_epoch)
+        #plt.title('loss')
+        #plt.show()
+
+        #test the model
+        correct = 0
+        total = 0
+        original_labels=[]
+        predicted_labels=[]
+        predicted_logits=[]
+        with torch.no_grad():
+            for x_test, y_test in test_dl:
+                y_pred = MLP(x_test)
+                #get the predicted logit and get the index of the max logit, this is the predicted class
+                _, predicted = torch.max(y_pred.data, 1)
+                total += y_test.size(0)
+                correct += (predicted == y_test).sum().item()
+                original_labels.append(y_test.data)
+                predicted_labels.append(predicted)
+                predicted_logits.append(_)
+        original_labels=torch.cat(original_labels,0)
+        predicted_labels=torch.cat(predicted_labels,0)
+
+        F1_score=MulticlassF1Score(num_classes=3,average='macro')
+        cohen_kappa_score=MulticlassCohenKappa(num_classes=3)
+
+        print('accuracy on test set: {} %'.format(100 * correct / total))
+        print(f'F1 score: {F1_score(predicted_labels,original_labels).item()}')
+        print(f'Cohen Kappa score: {cohen_kappa_score(predicted_labels,original_labels).item()}')
+
+
 
 
 
