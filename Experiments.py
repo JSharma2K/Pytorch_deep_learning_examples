@@ -17,7 +17,7 @@ from utils import r_squared
 from imblearn.combine import SMOTETomek
 from imblearn.under_sampling import TomekLinks
 from torch.utils.tensorboard import SummaryWriter
-from torchmetrics.classification import MulticlassF1Score,MulticlassCohenKappa,MulticlassAUROC
+from torchmetrics.classification import MulticlassF1Score,MulticlassCohenKappa,MulticlassPrecision,MulticlassRecall
 
 
 class Dataset:
@@ -605,11 +605,14 @@ class Experiment:
 
         F1_score=MulticlassF1Score(num_classes=3,average='macro')
         cohen_kappa_score=MulticlassCohenKappa(num_classes=3)
+        precision=MulticlassPrecision(num_classes=3,average='macro')
+        recall=MulticlassRecall(num_classes=3,average='macro')
 
         print('accuracy on test set: {} %'.format(100 * correct / total))
         print(f'F1 score: {F1_score(predicted_labels,original_labels).item()}')
         print(f'Cohen Kappa score: {cohen_kappa_score(predicted_labels,original_labels).item()}')
-
+        print(f'Precision is: {precision(predicted_labels,original_labels).item()} and Recall is: {recall(predicted_labels,original_labels).item()}')
+        print('Example completed')
 
 
 
