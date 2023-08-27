@@ -17,6 +17,8 @@ from utils import r_squared
 from imblearn.combine import SMOTETomek
 from imblearn.under_sampling import TomekLinks
 from torch.utils.tensorboard import SummaryWriter
+import fasttext
+from nltk.tokenize import RegexpTokenizer
 from torchmetrics.classification import MulticlassF1Score,MulticlassCohenKappa,MulticlassPrecision,MulticlassRecall
 
 
@@ -87,6 +89,8 @@ class Experiment:
             self.pytorch_linear_regression_with_categorical(data_exploration=False)
         elif "tabular_binary_classification_example" == self.experiment_str:
             self.tabular_multiclass_classification_example(data_exploration=False)
+        elif "clustering"==self.experiment_str:
+            self.clustering_with_latent_embeddings_example(data_exploration=False)
 
     def pytorch_linear_regression_example(self,data_exploration=False):
         Dataframes=self.dataset.load_dataset()
@@ -183,6 +187,7 @@ class Experiment:
         plt.show()
 
         #test the model
+        MLP.eval()
         with torch.no_grad():
             y_pred_vals=[]
             for x_test, y_test in test_loader:
@@ -294,10 +299,10 @@ class Experiment:
 
         #create a dataset and dataloader
         class Dataset(torch.utils.data.Dataset):
-            def __init__(self, features, target,fitted_scaler_train,fitted_scaler_target):
+            def __init__(self, features, target, fitted_scaler_feature, fitted_scaler_target):
                 self.numerical_features = features.select_dtypes(include=['int64', 'float64'])
                 self.categorical_features=features.select_dtypes(include=['category'])
-                self.feature_scaler = fitted_scaler_train
+                self.feature_scaler = fitted_scaler_feature
                 self.target_scaler = fitted_scaler_target
                 self.target = target
 
@@ -318,11 +323,11 @@ class Experiment:
 
         feature_scaler = MinMaxScaler()
         target_scaler = MinMaxScaler()
-        fitted_scaler_train=feature_scaler.fit(X_train.select_dtypes(include=['int64', 'float64']))
+        fitted_scaler_feature=feature_scaler.fit(X_train.select_dtypes(include=['int64', 'float64']))
         fitted_scaler_target=target_scaler.fit(y_train.values.reshape(-1, 1))
 
-        train_dl= torch.utils.data.DataLoader(Dataset(X_train, y_train,fitted_scaler_train,fitted_scaler_target), batch_size=64, shuffle=True)
-        test_dl= torch.utils.data.DataLoader(Dataset(X_test, y_test,fitted_scaler_train,fitted_scaler_target), batch_size=64, shuffle=True)
+        train_dl= torch.utils.data.DataLoader(Dataset(X_train, y_train,fitted_scaler_feature,fitted_scaler_target), batch_size=64, shuffle=True)
+        test_dl= torch.utils.data.DataLoader(Dataset(X_test, y_test,fitted_scaler_feature,fitted_scaler_target), batch_size=64, shuffle=True)
 
         class EmbeddingNetwork(nn.Module):
             def __init__(self, categorical_dims):
@@ -402,7 +407,7 @@ class Experiment:
 
 
 
-
+        #n_cont or the second argument is the number of continuous(float/int) variables present in the dataset
         MLP_model_train=MLP_categorical_Regressor(embedded_cols.values() , 2)
         MLP_model_val = MLP_categorical_Regressor(embedded_cols.values(), 2)
         train_loss=train_model(MLP_model_train, train_dl, torch.nn.MSELoss(), torch.optim.Adam(MLP_model_train.parameters(), lr=0.001),50,train=False)
@@ -590,6 +595,7 @@ class Experiment:
         original_labels=[]
         predicted_labels=[]
         predicted_logits=[]
+        MLP.eval()
         with torch.no_grad():
             for x_test, y_test in test_dl:
                 y_pred = MLP(x_test)
@@ -603,6 +609,8 @@ class Experiment:
         original_labels=torch.cat(original_labels,0)
         predicted_labels=torch.cat(predicted_labels,0)
 
+        #for multiclass problems either you calculate all the below scores for each target class or you caclulate it and then
+        #average it over all the classes, this is what average='macro' does
         F1_score=MulticlassF1Score(num_classes=3,average='macro')
         cohen_kappa_score=MulticlassCohenKappa(num_classes=3)
         precision=MulticlassPrecision(num_classes=3,average='macro')
@@ -613,6 +621,245 @@ class Experiment:
         print(f'Cohen Kappa score: {cohen_kappa_score(predicted_labels,original_labels).item()}')
         print(f'Precision is: {precision(predicted_labels,original_labels).item()} and Recall is: {recall(predicted_labels,original_labels).item()}')
         print('Example completed')
+
+
+    def clustering_with_latent_embeddings_example(self,data_exploration=True):
+        '''
+        this example shows how to use the latent embeddings from an autoencoder to cluster the data
+        Implementing a Deep Clustering Network (please thoroughly read the paper to understand the code) - https://arxiv.org/pdf/1610.04794.pdf
+        the code is based on this repo - https://github.com/xuyxu/Deep-Clustering-Network/tree/master
+        The objective of this network is to simultaneously learn the latent vector and optimise it for K-means clustering while also implementing K-means to cluster the latent vectors
+        it uses an autoencoder for dimensionality reduction and K- means to cluster the latent vectors
+        the loss function is the sum of the reconstruction loss and the clustering loss
+        the reconstruction loss used is  MSE, the K-means loss is implemented with a regularization term
+        '''
+
+        Dataframes=self.dataset.load_dataset()
+        if len(Dataframes)==1:
+            anime_clustering_dataset=Dataframes[0]
+        else:
+            anime_clustering_dataset=pd.concat(Dataframes,ignore_index=True)
+
+        if data_exploration:
+            print(anime_clustering_dataset.head())
+            print(anime_clustering_dataset.info())
+            print(anime_clustering_dataset.describe())
+            print(anime_clustering_dataset.isna().sum())
+
+        #drop na values
+        anime_clustering_dataset.dropna(inplace=True)
+
+        #tokenize the name and genre columns
+
+        tokenizer = RegexpTokenizer(r'\w+')
+        anime_clustering_dataset['name']=anime_clustering_dataset['name'].apply(lambda x: ' '.join(tokenizer.tokenize(x)))
+        anime_clustering_dataset['genre']=anime_clustering_dataset['genre'].apply(lambda x: ' '.join(tokenizer.tokenize(x)))
+
+        #write name column to text file
+        columns_to_save=['name','genre']
+        for column in columns_to_save:
+            column_to_save = anime_clustering_dataset[column]
+
+            # Define the output file path
+            output_file_path = 'data/anime_{}.txt'.format(column)
+
+            # Write the column values to the .txt file for possible future embeddings via fasttext
+            with open(output_file_path, 'w') as f:
+                for value in column_to_save:
+                    f.write(value + '\n')
+
+        anime_clustering_dataset['name']= anime_clustering_dataset.name.astype('category')
+        anime_clustering_dataset['genre']= anime_clustering_dataset.genre.astype('category')
+        anime_clustering_dataset['name']=anime_clustering_dataset.name.cat.codes.astype('category')
+        anime_clustering_dataset['genre']=anime_clustering_dataset.genre.cat.codes.astype('category')
+
+        corr_df_int_columns=anime_clustering_dataset.select_dtypes(include=['int64','float64'])
+        feature_scaler_train = MinMaxScaler()
+        feature_scaler_test = MinMaxScaler()
+        train_set=anime_clustering_dataset.sample(frac=0.8)
+        test_set=anime_clustering_dataset.drop(train_set.index)
+        train_set_numeric=train_set.select_dtypes(include=['int64','float64'])
+        test_set_numeric=test_set.select_dtypes(include=['int64','float64'])
+        train_set_categorical=train_set.select_dtypes(include=['category'])
+        test_set_categorical=test_set.select_dtypes(include=['category'])
+
+        embedded_cols = {n: len(col.cat.categories) for n, col in train_set.items() if col.dtype.name == 'category' and len(col.cat.categories) > 2}
+
+        def get_fasttext_embeddings():
+            files_in_directory = [os.path.join('data', file) for file in os.listdir('data') if '.txt' in file]
+            model_list= []
+            for file in files_in_directory:
+                model = fasttext.train_unsupervised(file, model='skipgram')
+
+                model_list.append(model)
+
+        class Autoencoder_Dataset(torch.utils.data.Dataset):
+            def __init__(self, num_features, cat_features):
+                self.num_features = num_features
+                self.cat_features=cat_features
+
+            def __len__(self):
+                return len(self.num_features)
+
+            def __getitem__(self, idx):
+                numerical = torch.tensor(self.num_features.values).float()[idx]
+                categorical = torch.tensor(self.cat_features.values)[idx]
+
+                return F.normalize(numerical.unsqueeze(0)).squeeze(0),categorical
+
+
+        train_dl= torch.utils.data.DataLoader(Autoencoder_Dataset(train_set_numeric,train_set_categorical), batch_size=64, shuffle=True)
+        test_dl= torch.utils.data.DataLoader(Autoencoder_Dataset(test_set_numeric,test_set_categorical), batch_size=64, shuffle=True)
+
+
+        class EmbeddingNetwork(nn.Module):
+            def __init__(self, categorical_dims):
+                super().__init__()
+                self.categorical_dims= categorical_dims
+                self.all_embeddings = nn.ModuleList(
+                    [nn.Embedding(dim, min(50, (dim + 1) // 2)) for dim in self.categorical_dims])
+                self.files_in_directory = [os.path.join('data',file) for file in os.listdir('data') if '.txt' in file]
+
+            def forward(self, x_categorical):
+                embeddings = []
+                for i, e in enumerate(self.all_embeddings):
+                    embeddings.append(e(x_categorical[:, i]))
+                return F.normalize(torch.cat(embeddings, 1))
+
+
+
+
+        emb_out=[]
+        num_out=[]
+        embeddings = EmbeddingNetwork(embedded_cols.values())
+        for numerical_feat,categorical_feat in  train_dl:
+            embeddings_output=embeddings(categorical_feat)
+            emb_out.append(embeddings_output)
+            num_out.append(numerical_feat)
+        print('done')
+
+
+
+        class Autoencoder(nn.Module):
+            def __init__(self, embedding_sizes,n_continous_features):
+                super().__init__()
+                self.embeddings=EmbeddingNetwork(embedding_sizes)
+                n_emb = sum(e.embedding_dim for e in self.embeddings.all_embeddings) #length of all embeddings combined
+                self.n_emb, self.n_cont = n_emb, n_continous_features
+                self.hidden_dim=self.n_emb + self.n_cont
+
+                def init_weights(m):
+                    if isinstance(m, nn.Linear):
+                        torch.nn.init.xavier_uniform_(m.weight)
+                        m.bias.data.fill_(0.01)
+
+
+                #nn.Sequential is a container for several layers that can be stacked together it implements the forward pass automatically
+                self.encoder = nn.Sequential(
+                    nn.Linear(self.hidden_dim, 200),
+                    nn.ReLU(),
+                    nn.Linear(200, 100),
+                    nn.ReLU(),
+                    nn.Linear(100, 50),
+                    nn.ReLU(),
+                    nn.Linear(50, 16),
+                    nn.ReLU(),
+                    nn.Linear(16, 8),
+                    nn.ReLU(),
+                    nn.Linear(8, 2)
+                    )
+                self.encoder.apply(init_weights)
+                self.decoder = nn.Sequential(
+                    nn.Linear(2, 8),
+                    nn.ReLU(),
+                    nn.Linear(8, 16),
+                    nn.ReLU(),
+                    nn.Linear(16, 50),
+                    nn.ReLU(),
+                    nn.Linear(50, 100),
+                    nn.ReLU(),
+                    nn.Linear(100, 200),
+                    nn.ReLU(),
+                    nn.Linear(200, self.hidden_dim))
+                self.decoder.apply(init_weights)
+
+            def forward(self, x_categorical,x_numerical):
+                x = self.embeddings(x_categorical)
+                x = torch.cat([x, x_numerical], 1).to(torch.float32)
+                x = self.encoder(x)
+                x = self.decoder(x)
+                #sig = nn.Sigmoid()
+                return x
+
+        def generate_target(x_categorical,x_numerical):
+            embedding_network=EmbeddingNetwork(embedded_cols.values())
+            embedded_values=embedding_network(x_categorical)
+            x = torch.cat([x_numerical,embedded_values], 1)
+            #no need for the gradient for the target hence we detach it
+            return x.detach()
+
+        train=False
+        #train the autoencoder
+        autoencoder = Autoencoder(embedded_cols.values(), len(corr_df_int_columns.columns))
+        criterion = nn.MSELoss()
+        optimizer = torch.optim.Adam(autoencoder.parameters(), lr=0.001)
+        writer = SummaryWriter('runs/anime_autoencoder')
+        if train:
+            epochs=50
+            for epoch in range(epochs):
+                train_loss = 0.0
+                for x_numerical,x_categorical in train_dl:
+                    optimizer.zero_grad()
+                    output = autoencoder(x_categorical,x_numerical)
+                    target=generate_target(x_categorical,x_numerical)
+                    loss = criterion(output, target)
+                    writer.add_scalar('Loss/train', loss, epoch)  # visit http://localhost:6006 to view the graphs
+                    loss.backward()
+                    optimizer.step()
+                    train_loss += loss.item()
+                train_loss = train_loss / len(train_dl)
+                print('Epoch: {} \tTraining Loss: {:.6f}'.format(epoch + 1, train_loss))
+            torch.save(autoencoder.state_dict(),
+                       '/Users/sharma19/PycharmProjects/PersonalProject/models/anime_autoencoder_model_weights.pth')
+        else:
+            #validate the autoencoder
+            autoencoder.load_state_dict(torch.load('/Users/sharma19/PycharmProjects/PersonalProject/models/anime_autoencoder_model_weights.pth'))
+            autoencoder.eval()
+            test_loss = 0.0
+            target_vals=[]
+            predicted_vals=[]
+            with torch.no_grad():
+                for x_numerical,x_categorical in test_dl:
+                    output = autoencoder(x_categorical,x_numerical)
+                    predicted_vals.append(output)
+                    target=generate_target(x_categorical,x_numerical)
+                    target_vals.append(target)
+                    loss = criterion(output, target)
+                    test_loss += loss.item()
+                test_loss = test_loss / len(test_dl)
+                print('Validation Loss: {:.6f}'.format(test_loss))
+            plt.scatter(torch.cat([x for x in torch.cat([t for t in target_vals])])[1:2], torch.cat([x for x in torch.cat(predicted_vals)])[1:2])
+            plt.xlabel('target')
+            plt.ylabel('decoder output')
+            plt.title('Target vs Decoder output')
+            plt.show()
+
+            #calculate the r2 score
+
+
+            r2 = r_squared(torch.cat([t for t in target_vals]), torch.cat(predicted_vals))
+            print('r2 score: {}'.format(r2))
+
+        print('Autoencoder Trained')
+
+
+
+
+
+
+
+
+
 
 
 
