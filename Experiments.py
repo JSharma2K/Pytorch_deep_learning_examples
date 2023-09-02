@@ -8,6 +8,7 @@ from sklearn.preprocessing import MinMaxScaler
 import torch
 import torch.nn as nn
 from tqdm import tqdm
+import numpy as np
 import torch.optim as optim
 import datetime
 from torch.utils.data import WeightedRandomSampler
@@ -668,22 +669,9 @@ class Experiment:
                 for value in column_to_save:
                     f.write(value + '\n')
 
-        anime_clustering_dataset['name']= anime_clustering_dataset.name.astype('category')
-        anime_clustering_dataset['genre']= anime_clustering_dataset.genre.astype('category')
-        anime_clustering_dataset['name']=anime_clustering_dataset.name.cat.codes.astype('category')
-        anime_clustering_dataset['genre']=anime_clustering_dataset.genre.cat.codes.astype('category')
-
-        corr_df_int_columns=anime_clustering_dataset.select_dtypes(include=['int64','float64'])
-        feature_scaler_train = MinMaxScaler()
-        feature_scaler_test = MinMaxScaler()
-        train_set=anime_clustering_dataset.sample(frac=0.8)
-        test_set=anime_clustering_dataset.drop(train_set.index)
-        train_set_numeric=train_set.select_dtypes(include=['int64','float64'])
-        test_set_numeric=test_set.select_dtypes(include=['int64','float64'])
-        train_set_categorical=train_set.select_dtypes(include=['category'])
-        test_set_categorical=test_set.select_dtypes(include=['category'])
-
-        embedded_cols = {n: len(col.cat.categories) for n, col in train_set.items() if col.dtype.name == 'category' and len(col.cat.categories) > 2}
+        #anime_clustering_dataset['name']= anime_clustering_dataset.name.astype('category')
+        #anime_clustering_dataset['genre']= anime_clustering_dataset.genre.astype('category')
+        anime_clustering_dataset['type']=anime_clustering_dataset.type.astype('category')
 
         def get_fasttext_embeddings():
             files_in_directory = [os.path.join('data', file) for file in os.listdir('data') if '.txt' in file]
@@ -692,6 +680,48 @@ class Experiment:
                 model = fasttext.train_unsupervised(file, model='skipgram')
 
                 model_list.append(model)
+            return model_list
+        models=get_fasttext_embeddings()
+        embedding_sizes=[model.get_dimension() for model in models]
+        cat_embeddings_name = [models[0].get_word_vector(word) for word in anime_clustering_dataset['name']]
+        cat_embeddings_name = torch.tensor(np.array(cat_embeddings_name), dtype=torch.float32)
+
+
+        cat_embeddings_genre = [models[1].get_word_vector(word) for word in anime_clustering_dataset['genre']]
+        cat_embeddings_genre = torch.tensor(np.array(cat_embeddings_genre), dtype=torch.float32)
+
+        anime_clustering_dataset['genre']=cat_embeddings_genre
+        anime_clustering_dataset['name'] = cat_embeddings_name
+        anime_clustering_dataset['type']=anime_clustering_dataset.type.cat.codes.astype('float64')
+
+
+
+        #anime_clustering_dataset['name']=anime_clustering_dataset.name.cat.codes.astype('category')
+        #anime_clustering_dataset['genre']=anime_clustering_dataset.genre.cat.codes.astype('category')
+
+        corr_df_int_columns=anime_clustering_dataset.select_dtypes(include=['int64','float64'])
+        feature_scaler_train = MinMaxScaler()
+        feature_scaler_test = MinMaxScaler()
+        train_set=anime_clustering_dataset.sample(frac=0.8)
+        test_set=anime_clustering_dataset.drop(train_set.index)
+        train_set_numeric=train_set.select_dtypes(include=['int64','float64'])
+        test_set_numeric=test_set.select_dtypes(include=['int64','float64'])
+        train_set_categorical=train_set.select_dtypes(include=['float32'])
+        test_set_categorical=test_set.select_dtypes(include=['float32'])
+
+        #embedded_cols = {n: len(col.cat.categories) for n, col in train_set.items() if col.dtype.name == 'category' and len(col.cat.categories) > 2}
+
+        '''
+        def get_fasttext_embeddings():
+            files_in_directory = [os.path.join('data', file) for file in os.listdir('data') if '.txt' in file]
+            model_list= []
+            for file in files_in_directory:
+                model = fasttext.train_unsupervised(file, model='skipgram')
+
+                model_list.append(model)
+            return model_list
+        '''
+
 
         class Autoencoder_Dataset(torch.utils.data.Dataset):
             def __init__(self, num_features, cat_features):
@@ -703,15 +733,44 @@ class Experiment:
 
             def __getitem__(self, idx):
                 numerical = torch.tensor(self.num_features.values).float()[idx]
-                categorical = torch.tensor(self.cat_features.values)[idx]
+                #categorical = torch.tensor(self.cat_features.values,requires_grad=True)[idx]
+                categorical=[torch.tensor(i[idx],requires_grad=True) for i in self.cat_features]
 
-                return F.normalize(numerical.unsqueeze(0)).squeeze(0),categorical
-
-
-        train_dl= torch.utils.data.DataLoader(Autoencoder_Dataset(train_set_numeric,train_set_categorical), batch_size=64, shuffle=True)
-        test_dl= torch.utils.data.DataLoader(Autoencoder_Dataset(test_set_numeric,test_set_categorical), batch_size=64, shuffle=True)
+                return F.normalize(numerical.unsqueeze(0)).squeeze(0),categorical[0],categorical[1]
 
 
+        train_dl= torch.utils.data.DataLoader(Autoencoder_Dataset(train_set_numeric,[cat_embeddings_name,cat_embeddings_genre]), batch_size=64, shuffle=True)
+        test_dl= torch.utils.data.DataLoader(Autoencoder_Dataset(test_set_numeric,[cat_embeddings_name,cat_embeddings_genre]), batch_size=64, shuffle=True)
+
+        '''
+        class EmbeddingNetwork(nn.Module):
+            def __init__(self, categorical_dims,use_pretrained_embeddings=True,model_list=None):
+                super().__init__()
+                self.categorical_dims= categorical_dims
+                self.use_pretrained_embeddings=use_pretrained_embeddings
+                if not use_pretrained_embeddings:
+                    self.all_embeddings = nn.ModuleList(
+                        [nn.Embedding(dim, min(50, (dim + 1) // 2)) for dim in self.categorical_dims])
+                else:
+                    # Create embedding layer
+                    self.all_embeddings=nn.ModuleList()
+                    for model in model_list:
+                        embedding_dim = model.get_dimension()
+                        embedding_layer = [nn.Embedding(num_embeddings=5, embedding_dim=embedding_dim)]
+                        self.all_embeddings.append(embedding_layer)
+
+            def forward(self, x_categorical):
+                if not self.use_pretrained_embeddings:
+                    embeddings = []
+                    for i, e in enumerate(self.all_embeddings):
+                        embeddings.append(e(x_categorical[:, i]))
+                    return F.normalize(torch.cat(embeddings, 1))
+                else:
+                    embeddings=[]
+                    for i,e in enumerate(self.all_embeddings):
+                        embeddings.append(e(x_categorical[:,i]))
+                        torch.cat(embeddings, 1)   
+        '''
         class EmbeddingNetwork(nn.Module):
             def __init__(self, categorical_dims):
                 super().__init__()
@@ -729,22 +788,25 @@ class Experiment:
 
 
 
-        emb_out=[]
-        num_out=[]
-        embeddings = EmbeddingNetwork(embedded_cols.values())
-        for numerical_feat,categorical_feat in  train_dl:
-            embeddings_output=embeddings(categorical_feat)
-            emb_out.append(embeddings_output)
-            num_out.append(numerical_feat)
-        print('done')
+        #emb_out=[]
+        #num_out=[]
+        #embeddings = EmbeddingNetwork(embedded_cols.values(),use_pretrained_embeddings=True,model_list=get_fasttext_embeddings())
+        #for numerical_feat,categorical_feat in  train_dl:
+            #embeddings_output=embeddings(categorical_feat)
+            #emb_out.append(embeddings_output)
+            #num_out.append(numerical_feat)
+        #print('done')
+
+
 
 
 
         class Autoencoder(nn.Module):
             def __init__(self, embedding_sizes,n_continous_features):
                 super().__init__()
-                self.embeddings=EmbeddingNetwork(embedding_sizes)
-                n_emb = sum(e.embedding_dim for e in self.embeddings.all_embeddings) #length of all embeddings combined
+                #self.embeddings=EmbeddingNetwork(embedding_sizes)
+                #n_emb = sum(e.embedding_dim for e in self.embeddings.all_embeddings) #length of all embeddings combined
+                n_emb=sum(embedding_sizes)
                 self.n_emb, self.n_cont = n_emb, n_continous_features
                 self.hidden_dim=self.n_emb + self.n_cont
 
@@ -783,24 +845,26 @@ class Experiment:
                     nn.Linear(200, self.hidden_dim))
                 self.decoder.apply(init_weights)
 
-            def forward(self, x_categorical,x_numerical):
-                x = self.embeddings(x_categorical)
-                x = torch.cat([x, x_numerical], 1).to(torch.float32)
+            def forward(self, x_categorical_feat_1,x_categorical_feat_2,x_numerical):
+                #x = self.embeddings(x_categorical)
+                x = torch.cat([x_categorical_feat_1,x_categorical_feat_2, x_numerical], 1).to(torch.float32)
                 x = self.encoder(x)
                 x = self.decoder(x)
                 #sig = nn.Sigmoid()
                 return x
 
-        def generate_target(x_categorical,x_numerical):
-            embedding_network=EmbeddingNetwork(embedded_cols.values())
-            embedded_values=embedding_network(x_categorical)
-            x = torch.cat([x_numerical,embedded_values], 1)
+        def generate_target(x_categorical_feat_1,x_categorical_feat_2,x_numerical):
+            #embedding_network=EmbeddingNetwork(embedded_cols.values())
+            #embedded_values=embedding_network(x_categorical)
+            #x = torch.cat([x_numerical,embedded_values], 1)
             #no need for the gradient for the target hence we detach it
-            return x.detach()
+            #return x.detach()
+            return torch.cat([x_categorical_feat_1,x_categorical_feat_2, x_numerical],1).detach()
 
         train=False
         #train the autoencoder
-        autoencoder = Autoencoder(embedded_cols.values(), len(corr_df_int_columns.columns))
+        #autoencoder = Autoencoder(embedded_cols.values(), len(corr_df_int_columns.columns))
+        autoencoder = Autoencoder(embedding_sizes, len(corr_df_int_columns.columns))
         criterion = nn.MSELoss()
         optimizer = torch.optim.Adam(autoencoder.parameters(), lr=0.001)
         writer = SummaryWriter('runs/anime_autoencoder')
@@ -808,10 +872,10 @@ class Experiment:
             epochs=50
             for epoch in range(epochs):
                 train_loss = 0.0
-                for x_numerical,x_categorical in train_dl:
+                for x_numerical,x_categorical_feat_1,x_categorical_feat_2 in train_dl:
                     optimizer.zero_grad()
-                    output = autoencoder(x_categorical,x_numerical)
-                    target=generate_target(x_categorical,x_numerical)
+                    output = autoencoder(x_categorical_feat_1,x_categorical_feat_2,x_numerical)
+                    target=generate_target(x_categorical_feat_1,x_categorical_feat_2,x_numerical)
                     loss = criterion(output, target)
                     writer.add_scalar('Loss/train', loss, epoch)  # visit http://localhost:6006 to view the graphs
                     loss.backward()
@@ -829,16 +893,16 @@ class Experiment:
             target_vals=[]
             predicted_vals=[]
             with torch.no_grad():
-                for x_numerical,x_categorical in test_dl:
-                    output = autoencoder(x_categorical,x_numerical)
+                for x_numerical,x_categorical_feat_1,x_categorical_feat_2 in test_dl:
+                    output = autoencoder(x_categorical_feat_1,x_categorical_feat_2,x_numerical)
                     predicted_vals.append(output)
-                    target=generate_target(x_categorical,x_numerical)
+                    target=generate_target(x_categorical_feat_1,x_categorical_feat_2,x_numerical)
                     target_vals.append(target)
                     loss = criterion(output, target)
                     test_loss += loss.item()
                 test_loss = test_loss / len(test_dl)
                 print('Validation Loss: {:.6f}'.format(test_loss))
-            plt.scatter(torch.cat([x for x in torch.cat([t for t in target_vals])])[1:2], torch.cat([x for x in torch.cat(predicted_vals)])[1:2])
+            plt.scatter(torch.cat([x for x in torch.cat([t for t in target_vals])])[:10], torch.cat([x for x in torch.cat(predicted_vals)])[:10])
             plt.xlabel('target')
             plt.ylabel('decoder output')
             plt.title('Target vs Decoder output')
