@@ -13,6 +13,10 @@ import torch.optim as optim
 import datetime
 from torch.utils.data import WeightedRandomSampler
 import torch.nn.functional as F
+from sklearn.cluster import KMeans
+from sklearn.metrics import adjusted_rand_score
+from sklearn.metrics import normalized_mutual_info_score
+from joblib import Parallel, delayed
 from torch.utils.data import Dataset, DataLoader
 from utils import r_squared
 from imblearn.combine import SMOTETomek
@@ -22,7 +26,26 @@ import fasttext
 from nltk.tokenize import RegexpTokenizer
 from torchmetrics.classification import MulticlassF1Score,MulticlassCohenKappa,MulticlassPrecision,MulticlassRecall
 
+'''
+def threeSum(nums):
+    triplets = []
+    for i in range(len(nums) - 1):
+        for j in range(len(nums) - 1):
+            if i == j:
+                j += 1
+            duo_sum = nums[i] + nums[j]
+            sum_diff = 0 - duo_sum
+            compare_list = [nums[x] for x in range(len(nums)) if x not in [i, j]]
+            if sum_diff in compare_list:
+                if sorted([nums[i], nums[j], sum_diff]) not in triplets:
+                    triplets.append(sorted([nums[i], nums[j], sum_diff]))
+    return triplets
 
+
+#x=twoSum([2,7,11,15],target=9)
+x=threeSum([-1,0,1,2,-1,-4,-2,-3,3,0,4])
+print(x)
+'''
 class Dataset:
 
     def __init__(self, path,experiment_str):
@@ -734,7 +757,8 @@ class Experiment:
             def __getitem__(self, idx):
                 numerical = torch.tensor(self.num_features.values).float()[idx]
                 #categorical = torch.tensor(self.cat_features.values,requires_grad=True)[idx]
-                categorical=[torch.tensor(i[idx],requires_grad=True) for i in self.cat_features]
+                #categorical=[torch.tensor(i[idx],requires_grad=True) for i in self.cat_features]
+                categorical=[i[idx].clone().detach().requires_grad_(True) for i in self.cat_features]
 
                 return F.normalize(numerical.unsqueeze(0)).squeeze(0),categorical[0],categorical[1]
 
@@ -797,17 +821,64 @@ class Experiment:
             #num_out.append(numerical_feat)
         #print('done')
 
+        #for sake of simplicity adding batch k-means class code here
 
+        def _parallel_compute_distance(X, cluster):
+            n_samples = X.shape[0]
+            dis_mat = np.zeros((n_samples, 1))
+            #calculating euclidean distance of points to cluster centers
+            for i in range(n_samples):
+                dis_mat[i] += np.sqrt(np.sum((X[i] - cluster) ** 2, axis=0))
+            return dis_mat
 
+        class batch_KMeans:
 
+            def __init__(self, latent_dim, n_clusters,n_jobs=1):
+                self.latent_dim = latent_dim
+                self.n_clusters = n_clusters
+                self.clusters = np.zeros((self.n_clusters, self.latent_dim))
+                self.count = 100 * np.ones((self.n_clusters))  # serve as learning rate
+                self.n_jobs = n_jobs
+
+            def _compute_dist(self, X):
+                dis_mat = Parallel(n_jobs=self.n_jobs)(
+                    delayed(_parallel_compute_distance)(X, self.clusters[i])
+                    for i in range(self.n_clusters))
+                dis_mat = np.hstack(dis_mat)
+
+                return dis_mat
+
+            def init_cluster(self, X, indices=None):
+                """ Generate initial clusters using sklearn.Kmeans """
+                model = KMeans(n_clusters=self.n_clusters,
+                               n_init=20)
+                model.fit(X)
+                self.clusters = model.cluster_centers_  # copy clusters
+
+            def update_cluster(self, X, cluster_idx):
+                """ Update clusters in Kmeans on a batch of data """
+                n_samples = X.shape[0]
+                for i in range(n_samples):
+                    self.count[cluster_idx] += 1
+                    eta = 1.0 / self.count[cluster_idx]
+                    updated_cluster = ((1 - eta) * self.clusters[cluster_idx] +
+                                       eta * X[i])
+                    self.clusters[cluster_idx] = updated_cluster
+
+            def update_assign(self, X):
+                """ Assign samples in `X` to clusters """
+                dis_mat = self._compute_dist(X)
+
+                return np.argmin(dis_mat, axis=1)
+        
 
         class Autoencoder(nn.Module):
-            def __init__(self, embedding_sizes,n_continous_features):
+            def __init__(self, embedding_size, n_continuous_features):
                 super().__init__()
                 #self.embeddings=EmbeddingNetwork(embedding_sizes)
                 #n_emb = sum(e.embedding_dim for e in self.embeddings.all_embeddings) #length of all embeddings combined
-                n_emb=sum(embedding_sizes)
-                self.n_emb, self.n_cont = n_emb, n_continous_features
+                n_emb=sum(embedding_size)
+                self.n_emb, self.n_cont = n_emb, n_continuous_features
                 self.hidden_dim=self.n_emb + self.n_cont
 
                 def init_weights(m):
@@ -845,10 +916,12 @@ class Experiment:
                     nn.Linear(200, self.hidden_dim))
                 self.decoder.apply(init_weights)
 
-            def forward(self, x_categorical_feat_1,x_categorical_feat_2,x_numerical):
+            def forward(self, x_categorical_feat_1,x_categorical_feat_2,x_numerical,latent=False):
                 #x = self.embeddings(x_categorical)
                 x = torch.cat([x_categorical_feat_1,x_categorical_feat_2, x_numerical], 1).to(torch.float32)
                 x = self.encoder(x)
+                if latent:
+                    return x
                 x = self.decoder(x)
                 #sig = nn.Sigmoid()
                 return x
@@ -914,6 +987,165 @@ class Experiment:
             r2 = r_squared(torch.cat([t for t in target_vals]), torch.cat(predicted_vals))
             print('r2 score: {}'.format(r2))
 
+        class DCN(nn.Module):
+            def __init__(self,lambda_coef,beta_coef,train_loader,test_loader,embedding_sizes,continous_features):
+                super().__init__()
+                self.autoencoder = Autoencoder(embedding_sizes, len(continous_features.columns))
+                self.kmeans = batch_KMeans(latent_dim=2,n_clusters=10)
+                self.lambda_coef=lambda_coef
+                self.beta_coef=beta_coef
+                self.train_loader=train_loader
+                self.test_loader=test_loader
+                self.criterion = nn.MSELoss()
+                self.optimizer = torch.optim.Adam(self.parameters(), lr=0.001)
+
+                if not self.beta_coef > 0:
+                    msg = 'beta should be greater than 0 but got value = {}.'
+                    raise ValueError(msg.format(self.beta))
+
+                if not self.lambda_coef > 0:
+                    msg = 'lamda should be greater than 0 but got value = {}.'
+                    raise ValueError(msg.format(self.lamda))
+
+            def combined_loss(self,x_categorical_feat_1,x_categorical_feat_2,x_numerical,cluster_id):
+                batch_size=x_categorical_feat_1.shape[0]
+                pretrained_autoencoder_model=self.autoencoder_model.load_state_dict(torch.load('/Users/sharma19/PycharmProjects/PersonalProject/models/anime_autoencoder_model_weights.pth'))
+                reconstructed_output=pretrained_autoencoder_model(x_categorical_feat_1,x_categorical_feat_2,x_numerical)
+                latent_vector=pretrained_autoencoder_model(x_categorical_feat_1,x_categorical_feat_2,x_numerical,latent=True)
+                X=generate_target(x_categorical_feat_1,x_categorical_feat_2,x_numerical)
+                rec_loss=self.lambda_coef*self.criterion(X,reconstructed_output)
+
+                #clustering_loss
+
+                dist_loss = torch.tensor(0.)
+                clusters = torch.FloatTensor(self.kmeans.clusters)
+                for i in range(batch_size):
+                    diff_vec = latent_vector[i] - clusters[cluster_id[i]]
+                    sample_dist_loss = torch.matmul(diff_vec.view(1, -1),
+                                                    diff_vec.view(-1, 1))
+                    dist_loss += 0.5 * self.beta * torch.squeeze(sample_dist_loss)
+
+                return (rec_loss + dist_loss,
+                        rec_loss.detach().numpy(),
+                        dist_loss.detach().numpy())
+
+            #Dont need to pretrain because we are using pretrained autoencoder by loading the weights
+
+            '''
+            def pretrain(self, train_loader, epoch=100, verbose=True):
+
+                if verbose:
+                    print('========== Start pretraining ==========')
+
+                rec_loss_list = []
+
+                self.train()
+                for e in range(epoch):
+                    for batch_idx, (data, _) in enumerate(train_loader):
+                        batch_size = data.size()[0]
+                        data = data.to(self.device).view(batch_size, -1)
+                        rec_X = self.autoencoder(data)
+                        loss = self.criterion(data, rec_X)
+
+                        if verbose and (batch_idx + 1) % self.args.log_interval == 0:
+                            msg = 'Epoch: {:02d} | Batch: {:03d} | Rec-Loss: {:.3f}'
+                            print(msg.format(e, batch_idx + 1,
+                                             loss.detach().cpu().numpy()))
+                            rec_loss_list.append(loss.detach().cpu().numpy())
+
+                        self.optimizer.zero_grad()
+                        loss.backward()
+                        self.optimizer.step()
+                self.eval()
+
+                if verbose:
+                    print('========== End pretraining ==========\n')
+            '''
+            def initialise_clusters(self):
+                batch_X = []
+                for x_numerical,x_categorical_feat_1,x_categorical_feat_2 in self.train_loader:
+                    batch_size = x_categorical_feat_1.size()[0]
+                    latent_X = self.autoencoder(x_categorical_feat_1,x_categorical_feat_2,x_numerical, latent=True)
+                    batch_X.append(latent_X.detach().cpu().numpy())
+                batch_X = np.vstack(batch_X)
+                self.kmeans.init_cluster(batch_X)
+
+            def fit(self,epoch,train_loader):
+                self.train()
+                rec_loss_list = []
+                dist_loss_list = []
+
+                # epochs will be defined in the main/solver function
+                #for e in range(epoch):
+                for batch_idx, (x_numerical,x_categorical_feat_1,x_categorical_feat_2) in enumerate(train_loader):
+                    batch_size = x_numerical.size()[0]
+                    #data = data.view(batch_size, -1)
+
+                    with torch.no_grad():
+                        latent_X = self.autoencoder(x_categorical_feat_1,x_categorical_feat_2,x_numerical, latent=True)
+
+                    cluster_id = self.kmeans.update_assign(latent_X.cpu().numpy())
+                    # [Step-2] Update clusters in batch Clustering
+                    elem_count = np.bincount(cluster_id,
+                                             minlength=self.kmeans.n_clusters)
+                    for k in range(self.kmeans.n_clusters):
+                        # avoid empty slicing
+                        if elem_count[k] == 0:
+                            continue
+                        self.kmeans.update_cluster(latent_X[cluster_id == k], k)
+
+
+                    loss, rec_loss, dist_loss = self.combined_loss(x_categorical_feat_1, x_categorical_feat_2,
+                                                                   x_numerical, cluster_id)
+                    self.optimizer.zero_grad()
+                    loss.backward()
+                    self.optimizer.step()
+
+                    msg = 'Epoch: {:02d} | Batch: {:03d} | Loss: {:.3f} | Rec-' \
+                          'Loss: {:.3f} | Dist-Loss: {:.3f}'
+                    print(msg.format(epoch, batch_idx + 1,
+                                     loss.detach().cpu().numpy(),
+                                     rec_loss, dist_loss))
+
+        def evaluate(model, test_loader):
+            y_test = []
+            y_pred = []
+            for x_numerical,x_categorical_feat_1,x_categorical_feat_2 in test_loader:
+                batch_size = x_numerical.size()[0]
+                #data = data.view(batch_size, -1).to(model.device)
+                latent_X = model.autoencoder(x_numerical,x_categorical_feat_1,x_categorical_feat_2, latent=True)
+                latent_X = latent_X.detach().cpu().numpy()
+
+                y_test.append(target.view(-1, 1).numpy())
+                y_pred.append(model.clustering.update_assign(latent_X).reshape(-1, 1))
+
+            y_test = np.vstack(y_test).reshape(-1)
+            y_pred = np.vstack(y_pred).reshape(-1)
+            return (normalized_mutual_info_score(y_test, y_pred),
+                    adjusted_rand_score(y_test, y_pred))
+
+        def solver(epoch, model, train_loader, test_loader):
+
+            #rec_loss_list = model.pretrain(train_loader, epoch=args.pre_epoch)
+            model.initialise_clusters()
+            nmi_list = []
+            ari_list = []
+
+            for e in range(epoch):
+                model.train()
+                model.fit(e, train_loader)
+
+                model.eval()
+                NMI, ARI = evaluate(model, test_loader)  # evaluation on the test_loader
+                nmi_list.append(NMI)
+                ari_list.append(ARI)
+
+                print('Epoch: {:02d} | NMI: {:.3f} | ARI: {:.3f}'.format(
+                    e + 1, NMI, ARI))
+
+            return nmi_list, ari_list
+
+        solver(10,DCN(0.1,0.1,train_dl,test_dl,embedding_sizes,corr_df_int_columns),train_dl,test_dl)
         print('Autoencoder Trained')
 
 
