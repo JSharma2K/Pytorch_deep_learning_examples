@@ -1148,7 +1148,7 @@ class Experiment:
         solver(10,DCN(0.1,0.1,train_dl,test_dl,embedding_sizes,corr_df_int_columns),train_dl,test_dl)
         print('Autoencoder Trained')
 
-#p
+#pp
 
 
 
