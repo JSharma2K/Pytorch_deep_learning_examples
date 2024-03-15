@@ -9,12 +9,14 @@ import torch
 import torch.nn as nn
 from tqdm import tqdm
 import numpy as np
+import random
+import umap
 import torch.optim as optim
 import datetime
 from torch.utils.data import WeightedRandomSampler
 import torch.nn.functional as F
 from sklearn.cluster import KMeans
-from sklearn.metrics import adjusted_rand_score
+from sklearn.metrics import adjusted_rand_score,silhouette_score, silhouette_samples
 from sklearn.metrics import normalized_mutual_info_score
 from joblib import Parallel, delayed
 from torch.utils.data import Dataset, DataLoader
@@ -24,6 +26,7 @@ from imblearn.under_sampling import TomekLinks
 from torch.utils.tensorboard import SummaryWriter
 import fasttext
 from nltk.tokenize import RegexpTokenizer
+from sklearn.cluster import KMeans
 from torchmetrics.classification import MulticlassF1Score,MulticlassCohenKappa,MulticlassPrecision,MulticlassRecall
 
 '''
@@ -46,6 +49,98 @@ def threeSum(nums):
 x=threeSum([-1,0,1,2,-1,-4,-2,-3,3,0,4])
 print(x)
 '''
+
+
+def firstMissingPositive(nums) -> int:
+    smallest_positive = 1
+    for num in sorted(nums):
+        if num <= 0:
+            continue
+        elif num - smallest_positive == 1 or num - smallest_positive == 0:
+            smallest_positive = num
+        else:
+            return smallest_positive+1
+    return smallest_positive+1
+
+firstMissingPositive([3,4,-1,1])
+
+'''
+def longestConsecutive(nums) -> int:
+    sorted_nums = sorted(nums)
+    curr_count = 1
+    if len(sorted_nums) == 0:
+        return 0
+    for val in range(len(nums) - 1):
+        if sorted_nums[val + 1] == sorted_nums[val]:
+            continue
+        if abs(sorted_nums[val + 1]) - abs(sorted_nums[val]) > 1:
+            return curr_count
+        else:
+            curr_count += 1
+    return curr_count
+
+
+x=longestConsecutive([9,1,4,7,3,-1,0,5,8,-1,6])
+print(x)
+'''
+
+'''
+def maxArea(height) -> int:
+    start = 0
+    end = len(height) - 1
+    max_area = 0
+    while start < end:
+        length = min(height[start],height[end])
+        width = end - start
+        area = length * width
+        if area > max_area:
+            max_area = area
+            start += 1
+        else:
+            start += 1
+
+        if start == end:
+            end -= 1
+            start = 0
+    return max_area
+
+ma=maxArea([1,8,6,2,5,4,8,3,7])
+'''
+
+'''
+def characterReplacement(s: str, k: int) -> int:
+    max_count = 1
+    start = 0
+    for c in range(len(s[start+1:]) - 1):
+        if s[start] == s[start+1:][c]:
+            max_count += 1
+        if s[start+1:][c] == s[start+1:][c + 1]:
+            max_count += 1
+        else:
+            start = c
+    return max_count+k
+
+c=characterReplacement("AABABBA",1)
+print(c)
+'''
+
+
+def search(nums, target: int) -> int:
+    middle = len(nums) // 2
+    if target not in nums:
+        return -1
+    if len(nums)==2 and target != nums[-1] and target<nums[-1]:
+        return 0
+    elif len(nums)==2:
+        return 1
+    while nums[middle] != target:
+        if target < nums[middle]:
+            middle -= math.ceil(len(nums[:middle]) / 2)
+        else:
+            middle += math.ceil(len(nums[middle:]) / 2)
+    return middle
+
+c=search([-1,0,5],-1)
 class Dataset:
 
     def __init__(self, path,experiment_str):
@@ -674,11 +769,12 @@ class Experiment:
         anime_clustering_dataset.dropna(inplace=True)
 
         #tokenize the name and genre columns
-
         tokenizer = RegexpTokenizer(r'\w+')
         anime_clustering_dataset['name']=anime_clustering_dataset['name'].apply(lambda x: ' '.join(tokenizer.tokenize(x)))
         anime_clustering_dataset['genre']=anime_clustering_dataset['genre'].apply(lambda x: ' '.join(tokenizer.tokenize(x)))
-
+        #replace spaces with underscores in name column
+        #anime_clustering_dataset['name']=anime_clustering_dataset['name'].apply(lambda x: x.replace(' ','_'))
+        anime_clustering_dataset['genre'] = anime_clustering_dataset['genre'].apply(lambda x: x.replace(' ', '_'))
         #write name column to text file
         columns_to_save=['name','genre']
         for column in columns_to_save:
@@ -698,19 +794,22 @@ class Experiment:
 
         def get_fasttext_embeddings():
             files_in_directory = [os.path.join('data', file) for file in os.listdir('data') if '.txt' in file]
-            model_list= []
+            model_list= {}
             for file in files_in_directory:
                 model = fasttext.train_unsupervised(file, model='skipgram')
 
-                model_list.append(model)
+                model_list[file.split("/")[-1]]=model
             return model_list
         models=get_fasttext_embeddings()
-        embedding_sizes=[model.get_dimension() for model in models]
-        cat_embeddings_name = [models[0].get_word_vector(word) for word in anime_clustering_dataset['name']]
+        embedding_sizes=[model.get_dimension() for model in models.values()]
+        cat_embeddings_name = [models["anime_name.txt"].get_word_vector(word) for word in anime_clustering_dataset['name']]
         cat_embeddings_name = torch.tensor(np.array(cat_embeddings_name), dtype=torch.float32)
+        #visualize the embeddings
 
 
-        cat_embeddings_genre = [models[1].get_word_vector(word) for word in anime_clustering_dataset['genre']]
+
+
+        cat_embeddings_genre = [models["anime_genre.txt"].get_word_vector(word) for word in anime_clustering_dataset['genre']]
         cat_embeddings_genre = torch.tensor(np.array(cat_embeddings_genre), dtype=torch.float32)
 
         anime_clustering_dataset['genre']=cat_embeddings_genre
@@ -725,7 +824,7 @@ class Experiment:
         corr_df_int_columns=anime_clustering_dataset.select_dtypes(include=['int64','float64'])
         feature_scaler_train = MinMaxScaler()
         feature_scaler_test = MinMaxScaler()
-        train_set=anime_clustering_dataset.sample(frac=0.8)
+        train_set=anime_clustering_dataset.sample(frac=0.8,random_state=2)
         test_set=anime_clustering_dataset.drop(train_set.index)
         train_set_numeric=train_set.select_dtypes(include=['int64','float64'])
         test_set_numeric=test_set.select_dtypes(include=['int64','float64'])
@@ -762,9 +861,9 @@ class Experiment:
 
                 return F.normalize(numerical.unsqueeze(0)).squeeze(0),categorical[0],categorical[1]
 
-
         train_dl= torch.utils.data.DataLoader(Autoencoder_Dataset(train_set_numeric,[cat_embeddings_name,cat_embeddings_genre]), batch_size=64, shuffle=True)
         test_dl= torch.utils.data.DataLoader(Autoencoder_Dataset(test_set_numeric,[cat_embeddings_name,cat_embeddings_genre]), batch_size=64, shuffle=True)
+
 
         '''
         class EmbeddingNetwork(nn.Module):
@@ -861,7 +960,7 @@ class Experiment:
                 for i in range(n_samples):
                     self.count[cluster_idx] += 1
                     eta = 1.0 / self.count[cluster_idx]
-                    updated_cluster = ((1 - eta) * self.clusters[cluster_idx] +
+                    updated_cluster = (torch.from_numpy((1 - eta) * self.clusters[cluster_idx])+
                                        eta * X[i])
                     self.clusters[cluster_idx] = updated_cluster
 
@@ -917,6 +1016,7 @@ class Experiment:
                 self.decoder.apply(init_weights)
 
             def forward(self, x_categorical_feat_1,x_categorical_feat_2,x_numerical,latent=False):
+
                 #x = self.embeddings(x_categorical)
                 x = torch.cat([x_categorical_feat_1,x_categorical_feat_2, x_numerical], 1).to(torch.float32)
                 x = self.encoder(x)
@@ -934,7 +1034,15 @@ class Experiment:
             #return x.detach()
             return torch.cat([x_categorical_feat_1,x_categorical_feat_2, x_numerical],1).detach()
 
-        train=False
+
+
+        def generate_KMeans_target(x_categorical_feat_1,x_categorical_feat_2,x_numerical):
+            X=torch.cat([x_categorical_feat_1,x_categorical_feat_2,x_numerical],1).detach().numpy()
+            kmeans=KMeans(n_clusters=10, n_init=20)
+            labels=kmeans.fit_predict(X)
+            return labels
+
+        train=True
         #train the autoencoder
         #autoencoder = Autoencoder(embedded_cols.values(), len(corr_df_int_columns.columns))
         autoencoder = Autoencoder(embedding_sizes, len(corr_df_int_columns.columns))
@@ -945,11 +1053,14 @@ class Experiment:
             epochs=50
             for epoch in range(epochs):
                 train_loss = 0.0
+                torch.manual_seed(42)
+                np.random.seed(42)
+                random.seed(42)
                 for x_numerical,x_categorical_feat_1,x_categorical_feat_2 in train_dl:
                     optimizer.zero_grad()
                     output = autoencoder(x_categorical_feat_1,x_categorical_feat_2,x_numerical)
-                    target=generate_target(x_categorical_feat_1,x_categorical_feat_2,x_numerical)
-                    loss = criterion(output, target)
+                    target_train=generate_target(x_categorical_feat_1,x_categorical_feat_2,x_numerical)
+                    loss = criterion(output, target_train)
                     writer.add_scalar('Loss/train', loss, epoch)  # visit http://localhost:6006 to view the graphs
                     loss.backward()
                     optimizer.step()
@@ -966,12 +1077,13 @@ class Experiment:
             target_vals=[]
             predicted_vals=[]
             with torch.no_grad():
+                torch.manual_seed(42)
                 for x_numerical,x_categorical_feat_1,x_categorical_feat_2 in test_dl:
                     output = autoencoder(x_categorical_feat_1,x_categorical_feat_2,x_numerical)
                     predicted_vals.append(output)
-                    target=generate_target(x_categorical_feat_1,x_categorical_feat_2,x_numerical)
-                    target_vals.append(target)
-                    loss = criterion(output, target)
+                    target_val=generate_target(x_categorical_feat_1,x_categorical_feat_2,x_numerical)
+                    target_vals.append(target_val)
+                    loss = criterion(output, target_val)
                     test_loss += loss.item()
                 test_loss = test_loss / len(test_dl)
                 print('Validation Loss: {:.6f}'.format(test_loss))
@@ -1009,11 +1121,12 @@ class Experiment:
 
             def combined_loss(self,x_categorical_feat_1,x_categorical_feat_2,x_numerical,cluster_id):
                 batch_size=x_categorical_feat_1.shape[0]
-                pretrained_autoencoder_model=self.autoencoder_model.load_state_dict(torch.load('/Users/sharma19/PycharmProjects/PersonalProject/models/anime_autoencoder_model_weights.pth'))
-                reconstructed_output=pretrained_autoencoder_model(x_categorical_feat_1,x_categorical_feat_2,x_numerical)
-                latent_vector=pretrained_autoencoder_model(x_categorical_feat_1,x_categorical_feat_2,x_numerical,latent=True)
+                self.autoencoder.load_state_dict(torch.load('/Users/sharma19/PycharmProjects/PersonalProject/models/anime_autoencoder_model_weights.pth'))
+                reconstructed_output= self.autoencoder(x_categorical_feat_1,x_categorical_feat_2,x_numerical)
+                latent_vector= self.autoencoder(x_categorical_feat_1,x_categorical_feat_2,x_numerical,latent=True)
                 X=generate_target(x_categorical_feat_1,x_categorical_feat_2,x_numerical)
                 rec_loss=self.lambda_coef*self.criterion(X,reconstructed_output)
+
 
                 #clustering_loss
 
@@ -1021,9 +1134,10 @@ class Experiment:
                 clusters = torch.FloatTensor(self.kmeans.clusters)
                 for i in range(batch_size):
                     diff_vec = latent_vector[i] - clusters[cluster_id[i]]
+                    # basically taking the dot product below can be done via torch.dot(diff_vec,diff_vec.T) also
                     sample_dist_loss = torch.matmul(diff_vec.view(1, -1),
                                                     diff_vec.view(-1, 1))
-                    dist_loss += 0.5 * self.beta * torch.squeeze(sample_dist_loss)
+                    dist_loss += 0.5 * self.beta_coef * torch.squeeze(sample_dist_loss)
 
                 return (rec_loss + dist_loss,
                         rec_loss.detach().numpy(),
@@ -1078,6 +1192,7 @@ class Experiment:
                 # epochs will be defined in the main/solver function
                 #for e in range(epoch):
                 for batch_idx, (x_numerical,x_categorical_feat_1,x_categorical_feat_2) in enumerate(train_loader):
+
                     batch_size = x_numerical.size()[0]
                     #data = data.view(batch_size, -1)
 
@@ -1092,11 +1207,12 @@ class Experiment:
                         # avoid empty slicing
                         if elem_count[k] == 0:
                             continue
+                        #latent_X[cluster_id == k] gets all of elements in a particular cluster id
                         self.kmeans.update_cluster(latent_X[cluster_id == k], k)
 
 
-                    loss, rec_loss, dist_loss = self.combined_loss(x_categorical_feat_1, x_categorical_feat_2,
-                                                                   x_numerical, cluster_id)
+                    loss, rec_loss, dist_loss = self.combined_loss(x_categorical_feat_1, x_categorical_feat_2,x_numerical, cluster_id)
+
                     self.optimizer.zero_grad()
                     loss.backward()
                     self.optimizer.step()
@@ -1111,13 +1227,27 @@ class Experiment:
             y_test = []
             y_pred = []
             for x_numerical,x_categorical_feat_1,x_categorical_feat_2 in test_loader:
+
                 batch_size = x_numerical.size()[0]
                 #data = data.view(batch_size, -1).to(model.device)
                 latent_X = model.autoencoder(x_numerical,x_categorical_feat_1,x_categorical_feat_2, latent=True)
+
                 latent_X = latent_X.detach().cpu().numpy()
+                k_target=generate_KMeans_target(x_categorical_feat_1,x_categorical_feat_2,x_numerical)
+
+                target=generate_target(x_categorical_feat_1,x_categorical_feat_2,x_numerical)
 
                 y_test.append(target.view(-1, 1).numpy())
-                y_pred.append(model.clustering.update_assign(latent_X).reshape(-1, 1))
+                cluster_predictions=model.kmeans.update_assign(latent_X).reshape(-1, 1)
+                y_pred.append(cluster_predictions)
+                #get the silhouette scores for the clusters
+
+                sil_score=silhouette_score(latent_X,cluster_predictions)
+                #silhouette_samples()
+                #visualize the clusters
+                plt.scatter(latent_X[:,0],latent_X[:,1],c=cluster_predictions)
+                plt.title('Silhouette score: {}'.format(sil_score))
+                plt.show()
 
             y_test = np.vstack(y_test).reshape(-1)
             y_pred = np.vstack(y_pred).reshape(-1)
@@ -1147,6 +1277,8 @@ class Experiment:
 
         solver(10,DCN(0.1,0.1,train_dl,test_dl,embedding_sizes,corr_df_int_columns),train_dl,test_dl)
         print('Autoencoder Trained')
+
+
 
 
 
